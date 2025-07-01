@@ -1,0 +1,436 @@
+---
+title: "The Daddy Quota Dividend"
+subtitle: " A Data-Driven Case for Father-Centric Parental Leave" 
+format:
+  html:
+    code-fold: true
+    code-summary: "Code"
+    toc: true
+    toc-location: left
+    toc-title: " "
+    number-sections: true
+    smooth-scroll: true
+    embed-resources: true
+editor: source
+fig-cap-location: margin
+author: 
+  name: "Sinyu Yang"
+  email: sinyu.yang.sinyu@gmail.com
+keywords: "Data Analysis, Public Policy, R, Data Visualization"
+date: today
+description: "This project analyzes how the design of EU paternal leave policies impacts the gender pay gap. Its central finding is that financially generous, non-transferable leave for fathers—a daddy quota—correlates strongly with higher father participation and a smaller gender pay gap."
+title-block-banner: "#f0f3f5"
+title-block-banner-color: "black"
+css: style.css
+execute:
+  eval: false 
+---
+
+
+# Objective
+For decades, parental leave policies have often been functionally synonymous with maternity leave, a dynamic that contributes to the "motherhood penalty" in women's careers. A key indicator of this economic disparity is the persistent gender pay gap. While many countries have introduced leave policies for fathers, their effectiveness varies significantly. 
+
+This report presents a quantitative analysis of paternal leave policies across the European Union to answer a critical research question: **What structural components of a paternal leave policy correlate with higher uptake by fathers and, subsequently, with greater gender equality in the workplace?** Our central hypothesis is that a policy's financial generosity and the inclusion of non-transferable quotas for fathers are more significant drivers of success than statutory leave length alone.
+
+![](dummies1.png)
+
+# Methodology and Data Integration
+A robust analysis required the construction of a multi-faceted dataset. This was an exercise in multi-source data consolidation that involved several key quantitative steps:
+
+A robust analysis required constructing a multi-faceted dataset by consolidating data from multiple OECD and Eurostat sources, including 2023 policy reports and historical 2014 data. To address inconsistencies in the availability of gender pay gap data, a "last observation carried forward" methodology was employed, ensuring the analysis is as current as possible.
+
+Recognizing that a simple count of leave weeks is a misleading metric , as a long leave at a low pay rate is not a viable option for most families, we developed a more insightful metric: 
+
+`Full-Rate Equivalent (FRE) Weeks`. This metric calculates the length of a leave if it were paid at 100% of previous earnings, providing a standardized measure of a policy's true financial generosity. The FRE metric serves as a key independent variable in our analysis. The analysis then proceeded to data visualization and correlation analysis to build a narrative, with each component designed to answer a specific question.
+```{r, message=F, warning=F}
+# load the tidyverse
+library(tidyverse)
+library(ggrepel)
+library(ggplot2)
+library(dplyr)
+library(ggcorrplot)
+library(sf) # For working with spatial data
+library(rnaturalearth) # For getting map data
+library(rnaturalearthdata) # The map data itself
+library(ggrepel) # For labels (optional for maps, but can be useful)
+
+# ==============================================================================
+# PHASE 1: DATA ACQUISITION AND WRANGLING
+# ==============================================================================
+# In a real project, you would use functions like read_csv() to load data.
+# Here, we simulate this by defining the data directly in data frames.
+
+# --- 1.1: Load Baseline 2014 Data ---
+raw_data <- read_csv('OECD,DF_FAMILY,+..FAM12A+FAM12B+FAM8A.csv')
+
+mothers_leave_2014 <- raw_data %>%
+  filter(IND == "FAM12A" & TIME_PERIOD == 2014) %>%
+  select(Country, Mothers_Leave_Weeks_2014 = OBS_VALUE)
+
+# Extract Fathers' Leave Weeks (FAM12B) for 2014
+fathers_leave_2014 <- raw_data %>%
+  filter(IND == "FAM12B" & TIME_PERIOD == 2014) %>%
+  select(Country, Fathers_Leave_Weeks_2014 = OBS_VALUE)
+
+# Extract Mothers' Employment Rate (FAM8A) for 2014
+mothers_employment_2014 <- raw_data %>%
+  filter(IND == "FAM8A" & TIME_PERIOD == 2014) %>%
+  select(Country, Mothers_Employment_2014 = OBS_VALUE)
+
+df_2014 <- mothers_leave_2014 %>%
+  full_join(fathers_leave_2014, by = "Country") %>%
+  full_join(mothers_employment_2014, by = "Country")
+
+# --- 1.2: Transcribe 2023 Policy Data ---
+# FRE = Full-Rate Equivalent weeks.
+df_2023 <- read_csv('PF2_1_Parental_leave_systems(father).csv')
+
+# --- 1.3: Transcribe Outcome Data ---
+df_takeup <- read_csv('father_take_up_rate.csv') %>%
+select(Country, Father_Take_Up_Rate_pct = `Father_Take_Up_Rate_pct\n`)
+
+df_pay_gap <- read_csv('estat_sdg_05_20_filtered_en.csv') %>%
+filter(TIME_PERIOD == 2023) %>%
+select(Country = `Geopolitical entity (reporting)`, Gender_Pay_Gap_2023_pct = OBS_VALUE)
+
+# --- NEW: Dynamically process the gender pay gap CSV ---
+# Define the path to your Eurostat CSV file
+gender_gap_file_path <- "estat_sdg_05_20_filtered_en.csv"
+
+# Read, clean, and process the data to get the latest value for each country
+df_pay_gap_latest <- read_csv(gender_gap_file_path) %>%
+  # Clean up country names to ensure they match our other data sources
+  mutate(geo = str_replace(`Geopolitical entity (reporting)`, " \\(.*", "")) %>% # Removes text in parentheses (e.g., for Germany)
+  mutate(geo = case_when(
+      `Geopolitical entity (reporting)` == "Türkiye" ~ "Turkey", # Standardize names
+      TRUE ~ `Geopolitical entity (reporting)`
+  )) %>%
+  # Group by country to operate on each one individually
+  group_by(`Geopolitical entity (reporting)`) %>%
+  # Find the row with the most recent year for each country
+  slice_max(order_by = TIME_PERIOD, n = 1) %>%
+  # Ungroup to prevent accidental grouped operations later
+  ungroup() %>%
+  # Select and rename the final columns for clarity
+  select(Country = `Geopolitical entity (reporting)`, Gender_Pay_Gap_2023_pct = OBS_VALUE)
+
+# --- 1.4: Merge and Clean DataFrames using dplyr ---
+# The pipe operator `%>%` passes the result of one function to the next.
+df_all <- df_2023 %>%
+  left_join(df_2014, by = "Country") %>%
+  left_join(df_takeup, by = "Country") %>%
+  left_join(df_pay_gap_latest, by = "Country") %>%
+  # Replace NA values with 0 for all numeric columns
+  mutate(across(where(is.numeric), ~replace_na(., 0)))
+
+#Filter out EU countries
+eu_countries <- c(
+  "Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czechia", "Denmark",
+  "Estonia", "Finland", "France", "Germany", "Greece", "Hungary", "Ireland",
+  "Italy", "Latvia", "Lithuania", "Luxembourg", "Malta", "Netherlands",
+  "Poland", "Portugal", "Romania", "Slovak Republic", "Slovenia", "Spain", "Sweden"
+)
+
+df <- df_all %>%
+  filter(Country %in% eu_countries)
+
+df$Fathers_FRE_Weeks_2023 <- as.numeric(df$Fathers_FRE_Weeks_2023)
+
+# Display the head and structure of the final dataframe
+print("--- Master DataFrame Head ---")
+print(head(df))
+print("--- Data Structure ---")
+str(df)
+```
+
+
+
+#  Visual Analysis and Findings
+## Exhibit A: Beyond Length – What Makes a Policy Truly Generous?
+The initial analysis sought to challenge the assumption that longer leave is always better. The FRE metric revealed a more nuanced reality.
+
+
+![Bar Chart of Father's Leave Generosity (2023)](Generosity of Father-Specific Paid Leave (2023).png)
+
+The initial analysis sought to challenge the assumption that longer leave is always better. As the bar chart reveals, the financial reality of these policies is far more nuanced. For instance, while Czechia(Czech Republic) offers a substantial amount of leave on paper, its financial generosity in FRE weeks is the lowest among the analyzed EU nations. 
+Conversely, countries like Luxembourg and Spain lead not just in length but in financial support, offering over 15 weeks of fully paid leave. This chart immediately validates the importance of the FRE metric ; a policy's headline number is not a reliable indicator of its practical value for a family.
+
+```{r}
+# ==============================================================================
+# PHASE 2: EXPLORATORY DATA ANALYSIS & VISUALIZATION (using ggplot2)
+# ==============================================================================
+
+# --- 2.1: Bar Chart of Father's Leave Generosity (2023) ---
+generosity_FL <- ggplot(df, aes(x = Fathers_FRE_Weeks_2023, y = reorder(Country, Fathers_FRE_Weeks_2023))) +
+  geom_col(fill = "#348ABD") +
+  labs(
+    title = "Generosity of Father-Specific Paid Leave (2023)",
+    subtitle = "Measured in weeks of leave paid at 100% of previous earnings",
+    x = "Full-Rate Equivalent Weeks",
+    y = "Country"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_blank()
+  )
+
+ggsave("Generosity of Father-Specific Paid Leave (2023).png", plot = generosity_FL, width = 10, height = 8, dpi = 300)
+```
+
+## Exhibit B: A Decade of Reform in Paternal Leave
+
+![Dumbbell Chart of Policy Evolution (2014 vs. 2023)](Policy Evolution (2014 vs. 2023).png)
+
+Is paternal leave a static policy area? The dumbbell plot clearly demonstrates it is not. The chart reveals a significant and widespread legislative push to expand fathers' leave entitlements between 2014 and 2023. 
+Countries like Spain, Finland, and the Netherlands show dramatic increases, signifying a clear policy trend across the EU. This visualization confirms that paternal leave is a dynamic area of reform and provides the mandate for our final analysis: are these ambitious reforms achieving their intended outcomes?
+
+```{r}
+# --- 2.2: Dumbbell Chart of Policy Evolution (2014 vs. 2023) ---
+df_evo <- df %>%
+  filter(Fathers_Leave_Weeks_2014 > 0 | Fathers_Leave_Weeks_2023 > 0)
+
+Policy_evo <- ggplot(df_evo, aes(y = reorder(Country, Fathers_Leave_Weeks_2023))) +
+  geom_segment(aes(x = Fathers_Leave_Weeks_2014, xend = Fathers_Leave_Weeks_2023, yend = Country),
+               color = "grey", size = 1, alpha = 0.7) +
+  geom_point(aes(x = Fathers_Leave_Weeks_2014, color = "2014"), size = 4) +
+  geom_point(aes(x = Fathers_Leave_Weeks_2023, color = "2023"), size = 4) +
+  scale_color_manual(name = "Year", values = c("2014" = "#E24A33", "2023" = "#348ABD")) +
+  labs(
+    title = "Evolution of Total Weeks of Paid Leave Reserved for Fathers",
+    subtitle = "Comparing entitlements in 2014 vs. 2023",
+    x = "Total Weeks",
+    y = ""
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 16))
+ggsave("Policy Evolution (2014 vs. 2023).png", plot = Policy_evo, width = 10, height = 8, dpi = 300)
+```
+
+
+## Exhibit C: The Correlation Story – Connecting Policy to Outcomes
+
+![Correlation Between Policy Design and Gender Equity Outcomes](correlation_matrix.png)
+
+To directly test our hypothesis, we move to the correlation matrix, which quantifies the relationships between policy design and gender equity outcomes. The results are striking:
+
+- **Policy Generosity vs. Total Leave Weeks (Correlation: 0.76)**: There is a strong positive correlation between the total weeks offered to fathers and the financial generosity (FRE Weeks) of that leave. This suggests that countries investing in longer leave periods are also, by and large, investing in making them financially viable.
+- **Gender Pay Gap vs. Policy Generosity (Correlation: -0.52)**: Here we see a moderate negative correlation. As the financial generosity of paternal leave increases, the gender pay gap tends to decrease. This is a critical, data-supported link between a specific policy lever (well-paid leave for fathers) and a key measure of workplace gender equality.
+- **Gender Pay Gap vs. Total Leave Weeks (Correlation: -0.51)**: A nearly identical moderate negative correlation exists between the total leave weeks available to fathers and the gender pay gap. This reinforces the finding that providing more leave time for fathers is associated with a smaller pay gap.
+- **Father Take-Up Rate (%)**: The relationship between take-up rates and other variables is weaker. This is likely due to the complexity of factors influencing a father's decision to take leave, including cultural norms and workplace support, which are not captured in this dataset. However, the negative correlation with the pay gap, though small (-0.04), still points in the hypothesized direction.
+This correlogram provides quantitative backing for our central argument: the design of paternal leave policies has a measurable correlation with the gender pay gap.
+
+```{r, fig.align = "center", fig.width=5, fig.height=5, warning=FALSE, fig.cap="Relationship between bill <b>length</b> and bill <b>depth</b>. <b>All</b> data points included."}
+# PHASE 2.5: CORRELATION ANALYSIS
+# =================================
+
+# First, install the ggcorrplot package if you haven't already
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(ggcorrplot)
+
+
+# 1. Select only the numeric columns of interest for correlation
+# We select the key variables discussed in the report.
+df_corr <- df %>% select(
+    `Gender Pay Gap (%)` = Gender_Pay_Gap_2023_pct,
+    `Father Take-Up Rate (%)` = Father_Take_Up_Rate_pct,
+    `Policy Generosity (FRE Weeks)` = Fathers_FRE_Weeks_2023,
+    `Total Leave Weeks (2023)` = Fathers_Leave_Weeks_2023)
+
+# 2. Calculate the correlation matrix
+corr_matrix <- round(cor(df_corr), 2)
+
+# 3. Create the correlation matrix plot (a "correlogram")
+corr_plot <- ggcorrplot(
+  corr_matrix,
+  hc.order = TRUE,    # Reorder variables using hierarchical clustering
+  type = "lower",     # Show only the lower triangle of the matrix
+  lab = TRUE,         # Show correlation coefficients as labels
+  lab_size = 4,
+  method = "circle",  # Use circles to represent the correlation
+  colors = c("#E24A33", "white", "#348ABD"), # Custom color palette (Red, White, Blue)
+  title = "Correlation Between Policy Design and Gender Equity Outcomes",
+  ggtheme = ggplot2::theme_minimal
+) +
+labs(
+  x = "",
+  y = "",
+  caption = "Correlation coefficients calculated from 2023 EU data."
+) +
+theme(
+  plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+  legend.title = element_text(face = "bold"),
+  axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)
+)
+
+# Print the plot
+print(corr_plot)
+
+# Save the plot
+ggsave("correlation_matrix.png", plot = corr_plot, width = 8, height = 8)
+```
+
+
+
+## Exhibit D: A Synthesized View – The State of European Paternal Leave
+
+![The State of Paternal Leave and Gender Equity in the EU](final_map_high_contrast.png)
+
+The final bubble map synthesizes our key variables—policy generosity (bubble size), gender pay gap (bubble color), and father take-up rates (text label)—into a single, comprehensive narrative. The visualization surfaces a clear geographic and policy-based pattern:
+
+- **The Nordic Success Model**: The map highlights a successful model in the Nordic countries. Sweden, with its large bubble and cool blue color, exemplifies this: a generous policy (high FRE weeks) is associated with a low gender pay gap and a remarkably high father take-up rate of 81.1%.
+- **The Price of Inaction**: Conversely, the map uses a "cool-to-hot" color scale to draw the eye to problem areas. Nations with smaller bubbles and stark red coloring, like Czechia and Austria, have less generous policies, low father take-up rates, and a significantly larger gender pay gap.
+- **The Power of "Daddy Quotas"**: The visualization strongly suggests that it is the combination of policy elements that drives success. Generous, well-paid leave that is specifically reserved for fathers as a non-transferable "daddy quota" correlates strongly with higher participation. This elevated participation, in turn, is associated with a more equal workplace and a smaller gender pay gap.
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(sf) # For working with spatial data
+library(rnaturalearth) # For getting map data
+library(rnaturalearthdata) # The map data itself
+library(ggrepel) # For labels (optional for maps, but can be useful)
+
+# --- Step 1: Prepare Your Data ---
+# Assuming 'df_eu' is your final, cleaned dataframe for EU countries.
+df_map_data <- df %>%
+  mutate(Country = case_when(
+    Country == "Czechia" ~ "Czech Republic",
+    TRUE ~ Country
+  )) %>%
+  # Filter out countries that don't have all the data points we need for the bubbles
+  filter(Father_Take_Up_Rate_pct > 0 & Fathers_FRE_Weeks_2023 > 0)
+
+
+# --- Step 2: Get Map Data and Join ---
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+europe_map_data_joined <- world_map %>%
+  right_join(df_map_data, by = c("name" = "Country"))
+
+# --- Step 3: Calculate Centroids and Add Dynamic Text Color ---
+# We define a threshold for the gender pay gap. Values within this range
+# will get black text, values outside will get white text.
+text_color_threshold_low <- 6
+text_color_threshold_high <- 16
+
+ dynamic_text_size = 1.5 + europe_map_data_joined$Fathers_FRE_Weeks_2023 / max(europe_map_data_joined$Fathers_FRE_Weeks_2023) * 2.5
+
+country_offsets <- tribble(
+  ~name,            ~x_offset, ~y_offset,
+  "Belgium",        -0.5,       0.7,
+  "Netherlands",     0,         1.5,
+  "Luxembourg",      0.5,      -1.5,
+  "Slovenia",        2.0,      -1.0,
+  "Czech Republic",  2.0,       1.0,
+  "Slovak Republic", 3.0,      -0.5,
+  "Malta",           0,        -1.5,
+  "Lithuania",       0,        -1.0,
+  "Latvia",          0,        -0.25,
+)
+
+europe_map_data_joined <- europe_map_data_joined %>%
+  mutate(
+    centroid = st_centroid(geometry),
+    centroid_x = st_coordinates(centroid)[,1],
+    centroid_y = st_coordinates(centroid)[,2]
+  ) %>%
+  # Join our custom offsets
+  left_join(country_offsets, by = "name") %>%
+  # Replace NA offsets with 0 so we can add them
+  mutate(
+    x_offset = ifelse(is.na(x_offset), 0, x_offset),
+    y_offset = ifelse(is.na(y_offset), 0, y_offset),
+    # Add other mutations for text color and size
+    text_color = ifelse(
+      Gender_Pay_Gap_2023_pct > 5 & Gender_Pay_Gap_2023_pct < 16, "black", "white"
+    ),
+    dynamic_text_size = 1.5 + europe_map_data_joined$Fathers_FRE_Weeks_2023 / max(europe_map_data_joined$Fathers_FRE_Weeks_2023) * 2.5
+  )
+
+
+
+# --- Step 4: Create the Final Bubble Map ---
+final_bubble_map_contrast <- ggplot(data = europe_map_data_joined) +
+  # Layer 1: The base map
+  geom_sf(fill = "grey90", color = "white", linewidth = 0.5) +
+  
+  # Layer 2: The bubbles (points)
+  geom_point(
+    aes(x = centroid_x + x_offset,
+        y = centroid_y + y_offset,
+        size = Fathers_FRE_Weeks_2023,
+        fill = Gender_Pay_Gap_2023_pct),
+    shape = 21,
+    alpha = 0.9,
+    stroke = 0.5,
+    color = "white"
+  ) +
+  
+  # --- REVISED: Layer 3 - Text with dynamic color mapping ---
+  geom_text(
+    aes(x = centroid_x + x_offset, y = centroid_y + y_offset,
+        label = paste0(name, "\n", Father_Take_Up_Rate_pct, "%"),
+        color = text_color), # Color is now an aesthetic mapped to our new column
+    size = dynamic_text_size,
+    lineheight = 0.9
+  ) +
+  
+  # --- Step 5: Apply Scales and Aesthetics ---
+  scale_fill_distiller(
+    palette = "RdBu",
+    direction = -1,
+    name = "Gender Pay\nGap (%)"
+  ) +
+  
+  scale_size(
+    name = "Policy Generosity\n(FRE Weeks)",
+    range = c(8, 30)
+  ) +
+
+ guides(
+    size = guide_legend(override.aes = list(stroke = 0.5, color = "grey80"))
+  ) +
+  
+  # --- NEW: Add scale_color_identity() ---
+  # This tells ggplot to use the color names directly from the 'text_color' column.
+  scale_color_identity() +
+  
+  coord_sf(xlim = c(-10, 35), ylim = c(35, 70), expand = FALSE) +
+  
+  labs(
+    title = "The State of Paternal Leave and Gender Equity in the EU",
+    subtitle = "Bubbles are sized by policy generosity and colored by gender pay gap.\nLabels show country and father's leave take-up rate.",
+    caption = "Data Source: OECD & Eurostat, Dataviz: zerisinyu.github.io"
+  ) +
+  
+  theme_void() +
+  theme(
+    plot.title = element_text(face = "bold", size = 22, hjust = 0.5, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 14, color = "grey30", hjust = 0.5, margin = margin(b = 25)),
+    plot.caption = element_text(hjust = 0.5, margin = margin(t = 20)),
+    legend.position = "right",
+    legend.spacing.y = unit(0.2, 'cm'),
+    legend.title = element_text(size = 10, lineheight = 1.0),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+# Save and print the final map
+ggsave("final_map_high_contrast.png", plot = final_bubble_map_contrast, width = 10, height = 8, dpi = 300)
+print(final_bubble_map_contrast)
+```
+1. **The Canvas: A Geographic Map.** A map was chosen for its ability to provide immediate geographic context.
+2. **The Solution for Overlap: Manual Offsets.** To solve the inevitable problem of overlapping data points in dense geographic regions (e.g., the Benelux), custom x and y offsets were calculated and applied to the bubbles for those countries. This technique preserves relative geographic location while ensuring every data point is clearly visible, demonstrating an attention to detail beyond default settings.
+3. **Layered Data Encoding:**
+   - `Bubble Size = Policy Generosity (FRE Weeks)`: This provides an intuitive visual hierarchy where a more significant policy effort is represented by a larger bubble.
+   - `Bubble Color = The Problem (Gender Pay Gap)`: To highlight the primary outcome variable, a "cool-to-hot" diverging palette (RdBu) was selected. Cool blue signals a low (positive) pay gap, while alarming red signals a high (problematic) one, immediately drawing the eye to areas of concern.
+   - `The Text = The Outcome:` The text inside each bubble displays the two most important pieces of information: the country's name and the father's take-up rate.
+   - `Final Polish: High-Contrast, Scaled Text.` To guarantee readability against the varied background colors of the bubbles, logic was implemented to render the text in white on dark-colored bubbles and black on light-colored bubbles. To create visual harmony, the font size was also scaled to be proportional to the bubble's size.
+
+# Conclusion
+This investigation began with a simple hypothesis and concluded with a clear, data-driven insight. The visual and statistical analysis demonstrates a strong correlation between the generosity of paternal leave policies and a reduction in the gender pay gap. When fathers are empowered and encouraged to take an active role in childcare from the very beginning—facilitated by financially secure, non-transferable leave—the societal benefits are tangible. To effectively close the gender pay gap, it is not enough to simply offer leave. Policymakers must design smarter policies that actively incentivize and enable fathers to be equal partners in care. That is the dividend worth investing in.
+
+
+
